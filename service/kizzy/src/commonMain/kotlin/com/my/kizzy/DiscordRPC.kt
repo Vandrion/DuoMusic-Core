@@ -35,7 +35,7 @@ class DiscordRPC(
             buttons =
                 listOf(
                     "Listen on DuoMusic" to "https://simpmusic.org/app/watch?v=${song.videoId}",
-                    "Visit DuoMusic" to "https://github.com/Vandrox/DuoMusic",
+                    "Visit DuoMusic" to "https://github.com/Vandrion/DuoMusic",
                 ),
             type = Type.LISTENING,
             since = currentTime,
