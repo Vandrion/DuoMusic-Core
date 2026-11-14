@@ -11,8 +11,9 @@ import kotlinx.datetime.Month
 object Config {
     /**
      * Anything else is our APK renamed and re-signed by someone. The legacy com.maxrave.simpmusic
-     * names are the pre-rebrand identity (old installs), the com.github.hedroid.duomusic names are
-     * the current fork identity, and the last one is the vivo build (vivoAndroidApp): vivo's
+     * and com.github.hedroid.duomusic names are pre-rebrand identities (old installs), the
+     * com.github.Vandrox.duomusic names are the current fork identity (2026-11-14 GitHub account
+     * migration), and the last one is the vivo build (vivoAndroidApp): vivo's
      * Origin Island only follows packages on vivo's own list.
      */
     val OFFICIAL_PACKAGE_NAMES =
@@ -21,6 +22,8 @@ object Config {
             "com.maxrave.simpmusic.dev",
             "com.github.hedroid.duomusic",
             "com.github.hedroid.duomusic.dev",
+            "com.github.Vandrox.duomusic",
+            "com.github.Vandrox.duomusic.dev",
             "com.spotify.music",
         )
 

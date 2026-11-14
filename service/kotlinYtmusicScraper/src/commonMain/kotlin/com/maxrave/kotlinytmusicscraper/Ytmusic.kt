@@ -753,7 +753,7 @@ class Ytmusic {
         }
 
     suspend fun checkForGithubReleaseUpdate() =
-        httpClient.get("https://api.github.com/repos/hedroid/DuoMusic/releases/latest") {
+        httpClient.get("https://api.github.com/repos/Vandrox/DuoMusic/releases/latest") {
             contentType(ContentType.Application.Json)
         }
 
@@ -765,7 +765,7 @@ class Ytmusic {
      */
     suspend fun checkForGithubReleaseUpdateViaRedirect(): String? {
         val response =
-            httpClient.get("https://github.com/hedroid/DuoMusic/releases/latest") {
+            httpClient.get("https://github.com/Vandrox/DuoMusic/releases/latest") {
                 accept(ContentType.Application.Json)
             }
         val target = response.call.request.url.toString()
@@ -1494,16 +1494,16 @@ class Ytmusic {
         // hard-coded in source — they live only in this remote file, kept in a separate
         // repo so the main repo stays credential-free.
         // fork 2026-10-31: pointed at our own fork of simpmusic-files, renamed
-        // duomusic-files (upstream's repo stays alive, but rotation/availability is now
+        // DuoMusic-files; 2026-11-14 moved to the Vandrox account (upstream's repo stays alive, but rotation/availability is now
         // under our control). Upstream's repo also serves the player-config registry,
         // kuromoji dict and mpv natives — those deliberately still point at upstream.
         const val TIDAL_REMOTE_CONFIG_URL =
-            "https://raw.githubusercontent.com/hedroid/duomusic-files/refs/heads/main/remote-config.json"
+            "https://raw.githubusercontent.com/Vandrox/DuoMusic-files/refs/heads/main/remote-config.json"
 
         // Read by dev builds only, so a banner can be tried out without any real user seeing it.
         // (The fork's config repos no longer carry a promos block; the field simply stays null.)
         const val REMOTE_CONFIG_DEV_URL =
-            "https://raw.githubusercontent.com/hedroid/duomusic-files/refs/heads/main/remote-config-dev.json"
+            "https://raw.githubusercontent.com/Vandrox/DuoMusic-files/refs/heads/main/remote-config-dev.json"
     }
 }
 

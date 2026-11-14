@@ -578,7 +578,7 @@ internal class FileDownloadExporter(
 
             // 2) vorbis comment payload(little-endian 长度前缀);vendor 是写进 FLAC 的
             //    编码器署名(文件属性可见),只写不读,随品牌更名
-            val vendor = "DuoMusic-Hedroid".toByteArray(Charsets.UTF_8)
+            val vendor = "DuoMusic-Vandrox".toByteArray(Charsets.UTF_8)
             val baos = java.io.ByteArrayOutputStream()
             fun leU32(v: Int) {
                 baos.write(v and 0xFF)
