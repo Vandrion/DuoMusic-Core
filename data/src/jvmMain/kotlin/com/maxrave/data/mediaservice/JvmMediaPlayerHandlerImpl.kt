@@ -47,6 +47,8 @@ import com.maxrave.domain.source.MusicSource
 import com.maxrave.domain.data.player.AppOnScreen
 import com.maxrave.domain.data.player.AudioEffects
 import com.maxrave.domain.data.player.DelayEffect
+import com.maxrave.domain.data.player.EightDDirection
+import com.maxrave.domain.data.player.EightDEffect
 import com.maxrave.domain.data.player.GenericCastState
 import com.maxrave.domain.data.player.GenericCommandButton
 import com.maxrave.domain.data.player.GenericMediaItem
@@ -78,6 +80,7 @@ import com.maxrave.domain.mediaservice.handler.ToastType
 import com.maxrave.domain.mediaservice.player.MediaPlayerInterface
 import com.maxrave.domain.mediaservice.player.MediaPlayerListener
 import com.maxrave.domain.repository.AnalyticsRepository
+import com.maxrave.domain.repository.DiscordRepository
 import com.maxrave.domain.repository.LocalPlaylistRepository
 import com.maxrave.domain.repository.SongRepository
 import com.maxrave.domain.repository.StreamRepository
@@ -92,7 +95,6 @@ import com.maxrave.domain.utils.toListName
 import com.maxrave.domain.utils.toSongEntity
 import com.maxrave.domain.utils.toTrack
 import com.maxrave.logger.Logger
-import com.my.kizzy.DiscordRPC
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -158,6 +160,7 @@ class JvmMediaPlayerHandlerImpl(
     private val streamRepository: StreamRepository,
     private val localPlaylistRepository: LocalPlaylistRepository,
     private val analyticsRepository: AnalyticsRepository,
+    private val discordRepository: DiscordRepository,
     private val coroutineScope: CoroutineScope,
 ) : MediaPlayerHandler,
     MediaPlayerListener {
@@ -269,7 +272,7 @@ class JvmMediaPlayerHandlerImpl(
     override val player: MediaPlayerInterface = getKoin().get()
 
     @Volatile
-    private var discordRPC: DiscordRPC? = null
+    private var discordRPC: RichPresenceClient? = null
 
     /**
      * Built here rather than injected: it needs nothing this handler does not already hold, and
@@ -539,6 +542,19 @@ class JvmMediaPlayerHandlerImpl(
                 .distinctUntilChanged()
                 .collect { effects -> player.setAudioEffects(effects) }
         }
+        backgroundScope.launch {
+            combine(
+                dataStoreManager.eightDEnabled,
+                dataStoreManager.eightDDirection,
+                dataStoreManager.eightDPeriodSeconds,
+            ) { enabled, direction, seconds ->
+                if (enabled == TRUE) {
+                    EightDEffect(EightDDirection.fromStored(direction), seconds).normalized()
+                } else {
+                    null
+                }
+            }.distinctUntilChanged().collect { player.setEightD(it) }
+        }
         normalizeVolume =
             runBlocking { dataStoreManager.normalizeVolume.first() == TRUE }
         _nowPlaying.value = player.currentMediaItem
@@ -696,14 +712,14 @@ class JvmMediaPlayerHandlerImpl(
                 }
             val discordRPCEnabledJob =
                 launch {
-                    // Run Rich Presence only when enabled AND logged in (non-blank token); a blank-token
-                    // DiscordRPC loops reconnect forever (issue #2157). Combining both flows also tears
-                    // the RPC down as soon as the token is cleared on logout.
+                    // Run Rich Presence only when enabled AND logged in; a client built with a blank
+                    // token loops reconnect forever (issue #2157). Combining both flows also tears
+                    // the RPC down as soon as the user logs out.
                     combine(
                         dataStoreManager.richPresenceEnabled,
-                        dataStoreManager.discordToken,
-                    ) { enabled, token ->
-                        enabled == TRUE && token.isNotBlank()
+                        discordRepository.loggedIn,
+                    ) { enabled, loggedIn ->
+                        enabled == TRUE && loggedIn
                     }.distinctUntilChanged()
                         .collectLatest { shouldRun ->
                             if (shouldRun) {
@@ -711,7 +727,7 @@ class JvmMediaPlayerHandlerImpl(
                                 // on→off→on race must not skip (re)creating whichever of
                                 // discordRPC/rpcSenderJob dropped out (#Fix 6).
                                 if (discordRPC == null) {
-                                    discordRPC = DiscordRPC(dataStoreManager.discordToken.first())
+                                    discordRPC = createRichPresenceClient(discordRepository)
                                 }
                                 if (rpcSenderJob?.isActive != true) {
                                     // One sender for the whole RPC lifetime: collectLatest cancels an

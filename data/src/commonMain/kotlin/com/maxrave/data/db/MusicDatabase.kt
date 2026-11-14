@@ -33,6 +33,7 @@ import com.maxrave.domain.data.entities.TranslatedLyricsEntity
 import com.maxrave.domain.data.entities.YourYouTubePlaylistList
 import com.maxrave.domain.data.entities.analytics.EventArtistEntity
 import com.maxrave.domain.data.entities.analytics.PlaybackEventEntity
+import com.maxrave.domain.data.entities.sync.SyncChangeEntity
 
 @Database(
     entities = [
@@ -42,7 +43,7 @@ import com.maxrave.domain.data.entities.analytics.PlaybackEventEntity
         NotificationEntity::class, TranslatedLyricsEntity::class, PodcastsEntity::class, EpisodeEntity::class,
         YourYouTubePlaylistList::class, PlaybackEventEntity::class, EventArtistEntity::class,
         AutoEqEntryEntity::class, AutoEqIndexMetaEntity::class, AutoEqCurveEntity::class,
-        ArtistMotionEntity::class
+        ArtistMotionEntity::class, SyncChangeEntity::class,
     ],
     exportSchema = true,
     autoMigrations = [
@@ -120,12 +121,20 @@ import com.maxrave.domain.data.entities.analytics.PlaybackEventEntity
         // here; our v27 history stays frozen for fork users. One new table and nothing else, so
         // Room generates the migration itself.
         AutoMigration(32, 33),
+        // 34 is library sync (#2663): the sync_change table, plus nullable syncId columns (each
+        // with a unique index, which SQLite lets hold any number of NULLs) on local_playlist and
+        // playback_event, and playback_event.deviceId. Upstream shipped this as their v28 — same
+        // number, different schema — so it is renumbered to 34 here; our v28 history stays
+        // frozen for fork users. Only additions, so Room generates the migration itself.
+        AutoMigration(33, 34),
     ],
-    version = 33,
+    version = 34,
 )
 @TypeConverters(Converters::class)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun getDatabaseDao(): DatabaseDao
+
+    abstract fun getSyncDao(): SyncDao
 
     /**
      * Rewrite the database file so the pages a bulk delete freed go back to the filesystem.
@@ -143,6 +152,17 @@ abstract class MusicDatabase : RoomDatabase() {
      */
     suspend fun vacuum() {
         useWriterConnection { it.execSQL("VACUUM") }
+    }
+
+    /**
+     * Writes a consistent copy of the whole database to [path] with `VACUUM INTO`, which reads inside one
+     * transaction and so never copies a half-written state. Library sync takes one before a merge that
+     * deletes something. Needs the writer connection for the same reason as [vacuum], and the bundled
+     * SQLite every platform uses here, since `VACUUM INTO` arrived in SQLite 3.27.
+     */
+    suspend fun backupTo(path: String) {
+        val quoted = path.replace("'", "''")
+        useWriterConnection { it.execSQL("VACUUM INTO '$quoted'") }
     }
 }
 

@@ -11,6 +11,7 @@ import com.maxrave.data.repository.ArtistRepositoryImpl
 import com.maxrave.data.repository.AutoEqRepositoryImpl
 import com.maxrave.data.lyrics.LyricsRomanizerRepositoryImpl
 import com.maxrave.data.repository.CommonRepositoryImpl
+import com.maxrave.data.repository.DiscordRepositoryImpl
 import com.maxrave.data.repository.HomeRepositoryImpl
 import com.maxrave.data.repository.SourceRoutingHomeRepository
 import com.maxrave.data.repository.SourceRoutingSearchRepository
@@ -31,6 +32,7 @@ import com.maxrave.domain.repository.ArtistRepository
 import com.maxrave.domain.repository.AutoEqRepository
 import com.maxrave.domain.repository.LyricsRomanizerRepository
 import com.maxrave.domain.repository.CommonRepository
+import com.maxrave.domain.repository.DiscordRepository
 import com.maxrave.domain.repository.HomeRepository
 import com.maxrave.domain.repository.ImportRepository
 import com.maxrave.domain.repository.LocalPlaylistRepository
@@ -73,6 +75,11 @@ val repositoryModule =
             CommonRepositoryImpl(get(named(SERVICE_SCOPE)), get(), get(), get(), get(), get()).apply {
                 this.init("${fileDir()}/ytdlp-cookie.txt", get(), get<AppIdentity>().isDevBuild)
             }
+        }
+
+        // At start: a Full build drops the token kizzy's login left behind as soon as it launches.
+        single<DiscordRepository>(createdAtStart = true) {
+            DiscordRepositoryImpl(get())
         }
 
         // Lazy for the same reason its client is: the picker is the only thing that wants it.
