@@ -206,6 +206,7 @@ private val mediaServiceModule =
                         get(named(PLAYER_CACHE)),
                         get(),
                         get(),
+                        androidContext(),
                         get(named(SERVICE_SCOPE)),
                     ),
                 streamRepository = get(),
