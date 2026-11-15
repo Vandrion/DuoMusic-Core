@@ -133,7 +133,7 @@ class DiscordRpc(
 
     private companion object {
         const val TAG = "DiscordRpc"
-        const val APP_NAME = "SimpMusic"
+        const val APP_NAME = "DuoMusic"
         const val TYPE_LISTENING = 2
         const val USER_AGENT = "Discord-Android/314013;RNA"
         const val APP_ICON =
