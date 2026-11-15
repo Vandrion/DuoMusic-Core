@@ -11,6 +11,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import com.simpmusic.media_jvm.DesktopStorage
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -52,9 +53,7 @@ internal object MpvWaveformReader {
     private val progress = WaveformProgress()
     private val UNSAFE_FILE_CHARS = Regex("[^A-Za-z0-9_-]")
 
-    private val dir: File by lazy {
-        File(System.getProperty("user.home"), ".simpmusic" + File.separator + "waveforms").apply { mkdirs() }
-    }
+    private val dir: File by lazy { DesktopStorage.dir("waveforms") }
 
     /**
      * The stored waveform for [mediaId], or one measured from [sourceUrl]'s audio. [sourceUrl] is only

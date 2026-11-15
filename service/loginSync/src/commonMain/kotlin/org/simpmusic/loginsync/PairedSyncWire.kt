@@ -24,7 +24,10 @@ object PairedSyncWire {
     /** Administratively scoped multicast group the computer listens on for the phone's probe. */
     const val GROUP = "239.255.48.17"
 
-    const val PHONE_HEADER = "X-SimpMusic-Phone"
+    /** Phone→computer request header naming the phone. The legacy name is still sent alongside it
+     *  (2026-11-15 rebrand) so a desktop on an old build keeps reading it; the server accepts both. */
+    const val PHONE_HEADER = "X-DuoMusic-Phone"
+    const val PHONE_HEADER_LEGACY = "X-SimpMusic-Phone"
 
     // Compressed. A first round carries a year of plays and every row they point at.
     const val MAX_BODY_BYTES = 16 * 1024 * 1024
@@ -38,10 +41,26 @@ object PairedSyncWire {
     internal const val LOGINS = "logins"
     internal const val PROBE = "probe"
 
-    internal val PROBE_MAGIC = "SMSYNC1?".encodeToByteArray()
-    internal val REPLY_MAGIC = "SMSYNC1!".encodeToByteArray()
+    /**
+     * UDP probe magics (2026-11-15 rebrand): the phone probes with the CURRENT magic and falls back
+     * to LEGACY when nothing answers (a pre-rebrand desktop only knows LEGACY); the desktop answers
+     * with the magic it received and seals in that dialect, so both generations find each other.
+     */
+    internal val PROBE_MAGIC = "DMSYNC1?".encodeToByteArray()
+    internal val REPLY_MAGIC = "DMSYNC1!".encodeToByteArray()
+    internal val PROBE_MAGIC_LEGACY = "SMSYNC1?".encodeToByteArray()
+    internal val REPLY_MAGIC_LEGACY = "SMSYNC1!".encodeToByteArray()
 
     internal val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * Wire dialects (2026-11-15 rebrand), same policy as [LoginSyncWire]: seal in CURRENT, open
+     * both, reply in the dialect the request arrived in.
+     */
+    enum class Dialect {
+        CURRENT,
+        LEGACY,
+    }
 
     internal fun path(kind: String) = "/v2/$kind"
 
@@ -50,7 +69,27 @@ object PairedSyncWire {
         kind: String,
         reply: Boolean,
         phoneId: String,
-    ): ByteArray = "simpmusic-library-sync/v1/$kind/${if (reply) "reply" else "request"}/$phoneId".encodeToByteArray()
+    ): ByteArray = aad(Dialect.CURRENT, kind, reply, phoneId)
+
+    internal fun aad(
+        dialect: Dialect,
+        kind: String,
+        reply: Boolean,
+        phoneId: String,
+    ): ByteArray =
+        "${if (dialect == Dialect.CURRENT) "duomusic" else "simpmusic"}-library-sync/v1/$kind/${if (reply) "reply" else "request"}/$phoneId"
+            .encodeToByteArray()
+
+    /** Opens a body sealed in either dialect and says which one matched, so the reply can echo it. */
+    internal fun openSealed(
+        key: ByteArray,
+        kind: String,
+        reply: Boolean,
+        phoneId: String,
+        sealed: ByteArray,
+    ): Pair<ByteArray, Dialect>? =
+        LoginSyncCipher.open(key, aad(Dialect.CURRENT, kind, reply, phoneId), sealed)?.let { it to Dialect.CURRENT }
+            ?: LoginSyncCipher.open(key, aad(Dialect.LEGACY, kind, reply, phoneId), sealed)?.let { it to Dialect.LEGACY }
 
     private val random = SecureRandom()
 
@@ -117,7 +156,7 @@ internal data class KnockReply(
     val revoked: Boolean = false,
 )
 
-/** What the pairing QR carries: `simpmusic://sync-pair?h=<ip>&p=<port>&k=<base64url one-time key>`. */
+/** What the pairing QR carries: `duomusic://sync-pair?h=<ip>&p=<port>&k=<base64url one-time key>` (pre-rebrand: simpmusic://). */
 class SyncPairInvite(
     val hosts: List<String>,
     val port: Int,
@@ -126,10 +165,13 @@ class SyncPairInvite(
     fun toUri(): String = "$PREFIX?h=${hosts.joinToString(",")}&p=$port&k=${Base64.UrlSafe.encode(key)}"
 
     companion object {
-        private const val PREFIX = "simpmusic://sync-pair"
+        private const val PREFIX = "duomusic://sync-pair"
+
+        /** Pre-rebrand QRs; parsed forever so a desktop still on an old build can be scanned. */
+        private const val LEGACY_PREFIX = "simpmusic://sync-pair"
 
         fun parse(text: String): SyncPairInvite? {
-            if (!text.startsWith("$PREFIX?")) return null
+            if (!text.startsWith("$PREFIX?") && !text.startsWith("$LEGACY_PREFIX?")) return null
             val params =
                 text
                     .substringAfter('?')

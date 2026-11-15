@@ -5,6 +5,7 @@ import com.maxrave.logger.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.timeout
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -104,16 +105,23 @@ class PairedSyncClient {
         kind: String,
         plain: ByteArray,
     ): ByteArray {
-        val response =
+        var response =
             http.post("http://${hostPart(host)}:${invite.port}${PairedSyncWire.path(kind)}") {
                 setBody(LoginSyncCipher.seal(invite.key, PairedSyncWire.aad(kind, reply = false, phoneId = ""), plain))
             }
+        if (response.status == HttpStatusCode.Forbidden) {
+            // A pre-rebrand computer only opens the legacy AAD; a wrong one-time key fails both.
+            response =
+                http.post("http://${hostPart(host)}:${invite.port}${PairedSyncWire.path(kind)}") {
+                    setBody(LoginSyncCipher.seal(invite.key, PairedSyncWire.aad(PairedSyncWire.Dialect.LEGACY, kind, reply = false, phoneId = ""), plain))
+                }
+        }
         when (response.status) {
             HttpStatusCode.OK -> Unit
             HttpStatusCode.Forbidden, HttpStatusCode.Gone -> throw PairedSyncException(PairedSyncException.Kind.REFUSED, "HTTP ${response.status.value}")
             else -> throw PairedSyncException(PairedSyncException.Kind.FAILED, "HTTP ${response.status.value}")
         }
-        return LoginSyncCipher.open(invite.key, PairedSyncWire.aad(kind, reply = true, phoneId = ""), response.bodyAsBytes())
+        return PairedSyncWire.openSealed(invite.key, kind, reply = true, phoneId = "", sealed = response.bodyAsBytes())?.first
             ?: throw PairedSyncException(PairedSyncException.Kind.FAILED, "the computer's reply did not open with this code")
     }
 
@@ -141,9 +149,9 @@ class PairedSyncClient {
         try {
             val nonce = PairedSyncWire.nonce()
             val body = PairedSyncWire.json.encodeToString(Knock.serializer(), Knock(nonce)).encodeToByteArray()
-            val response =
+            var response =
                 http.post("http://${hostPart(host)}:${target.port}${PairedSyncWire.path(PairedSyncWire.KNOCK)}") {
-                    header(PairedSyncWire.PHONE_HEADER, target.phoneId)
+                    phoneHeaders(target.phoneId)
                     setBody(LoginSyncCipher.seal(target.key, PairedSyncWire.aad(PairedSyncWire.KNOCK, false, target.phoneId), body))
                     if (quick) {
                         timeout {
@@ -152,17 +160,39 @@ class PairedSyncClient {
                         }
                     }
                 }
+            if (response.status == HttpStatusCode.Forbidden) {
+                // A pre-rebrand computer could not open the current-dialect body; its legacy header
+                // is on the request already, so only the sealing needs to be redone.
+                response =
+                    http.post("http://${hostPart(host)}:${target.port}${PairedSyncWire.path(PairedSyncWire.KNOCK)}") {
+                        phoneHeaders(target.phoneId)
+                        setBody(LoginSyncCipher.seal(target.key, PairedSyncWire.aad(PairedSyncWire.Dialect.LEGACY, PairedSyncWire.KNOCK, false, target.phoneId), body))
+                        if (quick) {
+                            timeout {
+                                connectTimeoutMillis = 1_500
+                                requestTimeoutMillis = 4_000
+                            }
+                        }
+                    }
+            }
             if (response.status != HttpStatusCode.OK) {
                 null
             } else {
-                LoginSyncCipher
-                    .open(target.key, PairedSyncWire.aad(PairedSyncWire.KNOCK, true, target.phoneId), response.bodyAsBytes())
+                PairedSyncWire
+                    .openSealed(target.key, PairedSyncWire.KNOCK, reply = true, phoneId = target.phoneId, sealed = response.bodyAsBytes())
+                    ?.first
                     ?.let { verified(target, it, nonce, host) }
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             null
         }
+
+    /** Both dialects' phone headers, so computers on either build can name the phone. */
+    private fun HttpRequestBuilder.phoneHeaders(phoneId: String) {
+        header(PairedSyncWire.PHONE_HEADER, phoneId)
+        header(PairedSyncWire.PHONE_HEADER_LEGACY, phoneId)
+    }
 
     private fun verified(
         target: PairedTarget,
@@ -175,7 +205,11 @@ class PairedSyncClient {
         return LocatedDesktop(host, reply.port, reply.addresses, reply.revoked)
     }
 
-    /** One sealed UDP probe to the multicast group and every broadcast address; first verified answer wins. */
+    /**
+     * One sealed UDP probe to the multicast group and every broadcast address; first verified answer
+     * wins. Probes in the current dialect first; a computer on a pre-rebrand build answers only the
+     * legacy magic, so a silent network gets one legacy round before giving up.
+     */
     private suspend fun probe(target: PairedTarget): LocatedDesktop? =
         withContext(Dispatchers.IO) {
             try {
@@ -184,39 +218,45 @@ class PairedSyncClient {
                     socket.soTimeout = 300
                     val nonce = PairedSyncWire.nonce()
                     val idBytes = target.phoneId.encodeToByteArray()
-                    val sealed =
-                        LoginSyncCipher.seal(
-                            target.key,
-                            PairedSyncWire.aad(PairedSyncWire.PROBE, false, target.phoneId),
-                            PairedSyncWire.json.encodeToString(Knock.serializer(), Knock(nonce)).encodeToByteArray(),
-                        )
-                    val payload = PairedSyncWire.PROBE_MAGIC + byteArrayOf(idBytes.size.toByte()) + idBytes + sealed
-                    val destinations = listOf(PairedSyncWire.GROUP, "255.255.255.255") + broadcastAddresses()
-                    destinations.distinct().forEach { address ->
-                        runCatching { socket.send(DatagramPacket(payload, payload.size, InetAddress.getByName(address), target.port)) }
-                    }
-                    val deadline = System.currentTimeMillis() + 1_500
+                    val destinations = (listOf(PairedSyncWire.GROUP, "255.255.255.255") + broadcastAddresses()).distinct()
                     val buffer = ByteArray(8192)
-                    while (System.currentTimeMillis() < deadline) {
-                        val packet = DatagramPacket(buffer, buffer.size)
-                        try {
-                            socket.receive(packet)
-                        } catch (e: SocketTimeoutException) {
-                            continue
-                        }
-                        val data = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
-                        val magic = PairedSyncWire.REPLY_MAGIC
-                        if (data.size <= magic.size || !data.copyOfRange(0, magic.size).contentEquals(magic)) continue
-                        val plain =
-                            LoginSyncCipher.open(
+
+                    fun attempt(dialect: PairedSyncWire.Dialect): LocatedDesktop? {
+                        val magic = if (dialect == PairedSyncWire.Dialect.CURRENT) PairedSyncWire.PROBE_MAGIC else PairedSyncWire.PROBE_MAGIC_LEGACY
+                        val sealed =
+                            LoginSyncCipher.seal(
                                 target.key,
-                                PairedSyncWire.aad(PairedSyncWire.PROBE, true, target.phoneId),
-                                data.copyOfRange(magic.size, data.size),
-                            ) ?: continue
-                        val host = packet.address?.hostAddress ?: continue
-                        verified(target, plain, nonce, host)?.let { return@use it }
+                                PairedSyncWire.aad(dialect, PairedSyncWire.PROBE, false, target.phoneId),
+                                PairedSyncWire.json.encodeToString(Knock.serializer(), Knock(nonce)).encodeToByteArray(),
+                            )
+                        val payload = magic + byteArrayOf(idBytes.size.toByte()) + idBytes + sealed
+                        destinations.forEach { address ->
+                            runCatching { socket.send(DatagramPacket(payload, payload.size, InetAddress.getByName(address), target.port)) }
+                        }
+                        val deadline = System.currentTimeMillis() + 1_500
+                        while (System.currentTimeMillis() < deadline) {
+                            val packet = DatagramPacket(buffer, buffer.size)
+                            try {
+                                socket.receive(packet)
+                            } catch (e: SocketTimeoutException) {
+                                continue
+                            }
+                            val data = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
+                            // Either generation's reply magic may head the answer; the body follows it.
+                            val replyMagic =
+                                listOf(PairedSyncWire.REPLY_MAGIC, PairedSyncWire.REPLY_MAGIC_LEGACY)
+                                    .firstOrNull { data.size > it.size && data.copyOfRange(0, it.size).contentEquals(it) }
+                                    ?: continue
+                            val plain =
+                                PairedSyncWire.openSealed(target.key, PairedSyncWire.PROBE, reply = true, phoneId = target.phoneId, sealed = data.copyOfRange(replyMagic.size, data.size))
+                                    ?.first ?: continue
+                            val host = packet.address?.hostAddress ?: continue
+                            verified(target, plain, nonce, host)?.let { return it }
+                        }
+                        return null
                     }
-                    null
+
+                    attempt(PairedSyncWire.Dialect.CURRENT) ?: attempt(PairedSyncWire.Dialect.LEGACY)
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -283,22 +323,35 @@ class PairedSyncClient {
         kind: String,
         plain: ByteArray,
     ): ByteArray {
-        val response =
+        var response =
             try {
                 http.post("http://${hostPart(at.host)}:${at.port}${PairedSyncWire.path(kind)}") {
-                    header(PairedSyncWire.PHONE_HEADER, target.phoneId)
+                    phoneHeaders(target.phoneId)
                     setBody(LoginSyncCipher.seal(target.key, PairedSyncWire.aad(kind, false, target.phoneId), plain))
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 throw PairedSyncException(PairedSyncException.Kind.UNREACHABLE, e.describe())
             }
+        if (response.status == HttpStatusCode.Forbidden) {
+            // A pre-rebrand computer could not open the current-dialect body; retry once in legacy.
+            response =
+                try {
+                    http.post("http://${hostPart(at.host)}:${at.port}${PairedSyncWire.path(kind)}") {
+                        phoneHeaders(target.phoneId)
+                        setBody(LoginSyncCipher.seal(target.key, PairedSyncWire.aad(PairedSyncWire.Dialect.LEGACY, kind, false, target.phoneId), plain))
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    throw PairedSyncException(PairedSyncException.Kind.UNREACHABLE, e.describe())
+                }
+        }
         when (response.status) {
             HttpStatusCode.OK -> Unit
             HttpStatusCode.Forbidden -> throw PairedSyncException(PairedSyncException.Kind.REFUSED, "HTTP 403")
             else -> throw PairedSyncException(PairedSyncException.Kind.FAILED, "HTTP ${response.status.value}")
         }
-        return LoginSyncCipher.open(target.key, PairedSyncWire.aad(kind, true, target.phoneId), response.bodyAsBytes())
+        return PairedSyncWire.openSealed(target.key, kind, reply = true, phoneId = target.phoneId, sealed = response.bodyAsBytes())?.first
             ?: throw PairedSyncException(PairedSyncException.Kind.FAILED, "the computer's reply did not open with this phone's key")
     }
 

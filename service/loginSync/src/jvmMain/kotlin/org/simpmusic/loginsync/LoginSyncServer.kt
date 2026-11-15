@@ -103,8 +103,10 @@ class LoginSyncServer(
             return reject(call, kind, HttpStatusCode.PayloadTooLarge, "the sign-ins were larger than ${LoginSyncWire.MAX_BODY_BYTES / 1024 / 1024} MB")
         }
         try {
-            val plain =
-                LoginSyncCipher.open(key, LoginSyncWire.aad(kind, reply = false), call.receive<ByteArray>())
+            // Opens either dialect; the reply is sealed in the one the phone used, so a pre-rebrand
+            // phone (which only knows the legacy AAD) still reads it.
+            val (plain, dialect) =
+                LoginSyncWire.openSealed(key, kind, reply = false, sealed = call.receive<ByteArray>())
                     ?: return reject(call, kind, HttpStatusCode.Forbidden, "the phone used a different code")
             val reply =
                 when (kind) {
@@ -122,7 +124,7 @@ class LoginSyncServer(
                         "{}".encodeToByteArray()
                     }
                 }
-            call.respondBytes(LoginSyncCipher.seal(key, LoginSyncWire.aad(kind, reply = true), reply), ContentType.Application.OctetStream)
+            call.respondBytes(LoginSyncCipher.seal(key, LoginSyncWire.aad(dialect, kind, reply = true), reply), ContentType.Application.OctetStream)
             if (kind == LoginSyncWire.PAYLOAD) {
                 // Only once the phone has its answer.
                 delivered = true

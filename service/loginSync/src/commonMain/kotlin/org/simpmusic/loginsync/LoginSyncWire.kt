@@ -34,13 +34,45 @@ internal object LoginSyncWire {
 
     val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * Wire dialects (2026-11-15 rebrand): CURRENT speaks `duomusic-…` AAD strings, LEGACY is the
+     * `simpmusic-…` string every endpoint before the rebrand sealed with. We always SEAL in CURRENT;
+     * we OPEN both (an old peer's messages still arrive in LEGACY), and a server replies in the
+     * dialect the request came in, so old↔new pairs in either direction keep working.
+     */
+    enum class Dialect {
+        CURRENT,
+        LEGACY,
+    }
+
     fun path(kind: String) = "/v1/$kind"
 
     /** Associated data binding a sealed body to its message kind and direction. */
     fun aad(
         kind: String,
         reply: Boolean,
-    ): ByteArray = "simpmusic-login-sync/v1/$kind/${if (reply) "reply" else "request"}".encodeToByteArray()
+    ): ByteArray = aad(Dialect.CURRENT, kind, reply)
+
+    fun aad(
+        dialect: Dialect,
+        kind: String,
+        reply: Boolean,
+    ): ByteArray =
+        "${if (dialect == Dialect.CURRENT) "duomusic" else "simpmusic"}-login-sync/v1/$kind/${if (reply) "reply" else "request"}"
+            .encodeToByteArray()
+
+    /**
+     * Opens a body sealed in either dialect and says which one matched, so the reply can echo it.
+     * Null when neither opens: wrong key, or a body sealed for another kind.
+     */
+    fun openSealed(
+        key: ByteArray,
+        kind: String,
+        reply: Boolean,
+        sealed: ByteArray,
+    ): Pair<ByteArray, Dialect>? =
+        LoginSyncCipher.open(key, aad(Dialect.CURRENT, kind, reply), sealed)?.let { it to Dialect.CURRENT }
+            ?: LoginSyncCipher.open(key, aad(Dialect.LEGACY, kind, reply), sealed)?.let { it to Dialect.LEGACY }
 }
 
 /** The computer as it names itself, so the phone can ask "trust MINH-PC (Windows 11)?". */
@@ -64,7 +96,7 @@ class LoginSyncTransportException(
     }
 }
 
-/** What the QR carries: `simpmusic://login-sync?h=<ip>&p=<port>&k=<base64url key>`. */
+/** What the QR carries: `duomusic://login-sync?h=<ip>&p=<port>&k=<base64url key>` (pre-rebrand: simpmusic://). */
 class LoginSyncInvite(
     val hosts: List<String>,
     val port: Int,
@@ -73,11 +105,14 @@ class LoginSyncInvite(
     fun toUri(): String = "$PREFIX?h=${hosts.joinToString(",")}&p=$port&k=${Base64.UrlSafe.encode(key)}"
 
     companion object {
-        private const val PREFIX = "simpmusic://login-sync"
+        private const val PREFIX = "duomusic://login-sync"
+
+        /** Pre-rebrand QRs; parsed forever so a desktop still on an old build can be scanned. */
+        private const val LEGACY_PREFIX = "simpmusic://login-sync"
 
         /** Null for anything that is not a well-formed invite, so any other QR is simply ignored. */
         fun parse(text: String): LoginSyncInvite? {
-            if (!text.startsWith("$PREFIX?")) return null
+            if (!text.startsWith("$PREFIX?") && !text.startsWith("$LEGACY_PREFIX?")) return null
             // Split on the FIRST '=' only: the base64 key ends in padding.
             val params =
                 text

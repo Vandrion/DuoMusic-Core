@@ -116,10 +116,18 @@ class LoginSyncClient {
         kind: String,
         plain: ByteArray,
     ): ByteArray {
-        val response =
+        var response =
             http.post("http://$target:${code.port}${LoginSyncWire.path(kind)}") {
                 setBody(LoginSyncCipher.seal(code.key, LoginSyncWire.aad(kind, reply = false), plain))
             }
+        if (response.status == HttpStatusCode.Forbidden) {
+            // A pre-rebrand computer only opens the legacy AAD; retry once before calling it refused.
+            // A wrong code fails both dialects, so the retry cannot turn a genuine refusal into a pass.
+            response =
+                http.post("http://$target:${code.port}${LoginSyncWire.path(kind)}") {
+                    setBody(LoginSyncCipher.seal(code.key, LoginSyncWire.aad(LoginSyncWire.Dialect.LEGACY, kind, reply = false), plain))
+                }
+        }
         when (response.status) {
             HttpStatusCode.OK -> {
                 Unit
@@ -133,7 +141,9 @@ class LoginSyncClient {
                 throw LoginSyncTransportException(LoginSyncTransportException.Kind.FAILED, "HTTP ${response.status.value}")
             }
         }
-        return LoginSyncCipher.open(code.key, LoginSyncWire.aad(kind, reply = true), response.bodyAsBytes())
+        // The reply comes back in the dialect of our request (the desktop echoes it), but a reply
+        // from an old desktop is legacy-sealed regardless — openSealed accepts both.
+        return LoginSyncWire.openSealed(code.key, kind, reply = true, sealed = response.bodyAsBytes())?.first
             ?: throw LoginSyncTransportException(LoginSyncTransportException.Kind.FAILED, "the computer's reply did not open with this code")
     }
 

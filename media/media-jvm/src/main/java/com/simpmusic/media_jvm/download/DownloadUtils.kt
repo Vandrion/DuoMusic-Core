@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.lastOrNull
 import kotlinx.coroutines.launch
+import com.simpmusic.media_jvm.DesktopStorage
 import java.io.File
 
 private const val TAG = "DownloadUtils"
@@ -270,4 +271,4 @@ internal class DownloadUtils(
     }
 }
 
-fun getDownloadPath(): String = System.getProperty("user.home") + File.separator + ".simpmusic" + File.separator + "downloads"
+fun getDownloadPath(): String = DesktopStorage.dir("downloads").absolutePath

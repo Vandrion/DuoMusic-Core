@@ -117,9 +117,10 @@ class PairedSyncServer(
         kind: String,
     ) {
         val key = handler.pairingKey() ?: return call.respond(HttpStatusCode.Gone)
-        val plain =
-            readBody(call)?.let { LoginSyncCipher.open(key, PairedSyncWire.aad(kind, false, ""), it) }
+        val opened =
+            readBody(call)?.let { PairedSyncWire.openSealed(key, kind, reply = false, phoneId = "", sealed = it) }
                 ?: return call.respond(HttpStatusCode.Forbidden)
+        val (plain, dialect) = opened
         try {
             val phone = PairedSyncWire.json.decodeFromString(PhoneHello.serializer(), plain.decodeToString())
             val reply =
@@ -138,7 +139,7 @@ class PairedSyncServer(
                         )
                     PairedSyncWire.json.encodeToString(PairGrant.serializer(), grant)
                 }
-            respondSealed(call, key, kind, "", reply.encodeToByteArray())
+            respondSealed(call, key, kind, dialect, phoneId = "", reply.encodeToByteArray())
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Logger.e(TAG, "pairing $kind", e)
@@ -147,16 +148,20 @@ class PairedSyncServer(
     }
 
     private suspend fun knock(call: ApplicationCall) {
-        val phoneId = call.request.headers[PairedSyncWire.PHONE_HEADER] ?: return call.respond(HttpStatusCode.Forbidden)
+        val phoneId = phoneIdOf(call) ?: return call.respond(HttpStatusCode.Forbidden)
         val active = handler.keyFor(phoneId)
         val key = active ?: handler.revokedKeyFor(phoneId) ?: return call.respond(HttpStatusCode.Forbidden)
-        val knock =
+        val opened =
             readBody(call)
-                ?.let { LoginSyncCipher.open(key, PairedSyncWire.aad(PairedSyncWire.KNOCK, false, phoneId), it) }
-                ?.let { runCatching { PairedSyncWire.json.decodeFromString(Knock.serializer(), it.decodeToString()) }.getOrNull() }
+                ?.let { PairedSyncWire.openSealed(key, PairedSyncWire.KNOCK, reply = false, phoneId = phoneId, sealed = it) }
+                ?.let { (plain, dialect) ->
+                    runCatching { PairedSyncWire.json.decodeFromString(Knock.serializer(), plain.decodeToString()) }
+                        .getOrNull()?.let { it to dialect }
+                }
                 ?: return call.respond(HttpStatusCode.Forbidden)
+        val (knock, dialect) = opened
         val reply = knockReply(knock.nonce, revoked = active == null)
-        respondSealed(call, key, PairedSyncWire.KNOCK, phoneId, reply)
+        respondSealed(call, key, PairedSyncWire.KNOCK, dialect, phoneId, reply)
         if (active == null) handler.onRevokedTold(phoneId)
     }
 
@@ -164,10 +169,10 @@ class PairedSyncServer(
         call: ApplicationCall,
         kind: String,
     ) {
-        val phoneId = call.request.headers[PairedSyncWire.PHONE_HEADER] ?: return call.respond(HttpStatusCode.Forbidden)
+        val phoneId = phoneIdOf(call) ?: return call.respond(HttpStatusCode.Forbidden)
         val key = handler.keyFor(phoneId) ?: return call.respond(HttpStatusCode.Forbidden)
-        val plain =
-            readBody(call)?.let { LoginSyncCipher.open(key, PairedSyncWire.aad(kind, false, phoneId), it) }
+        val (plain, dialect) =
+            readBody(call)?.let { PairedSyncWire.openSealed(key, kind, reply = false, phoneId = phoneId, sealed = it) }
                 ?: return call.respond(HttpStatusCode.Forbidden)
         try {
             val reply =
@@ -185,7 +190,7 @@ class PairedSyncServer(
                         plain
                     }
                 }
-            respondSealed(call, key, kind, phoneId, reply)
+            respondSealed(call, key, kind, dialect, phoneId, reply)
             // After the reply: the phone must hear it was taken before its key is forgotten.
             if (kind == PairedSyncWire.UNPAIR) handler.onUnpair(phoneId)
         } catch (e: Exception) {
@@ -194,6 +199,10 @@ class PairedSyncServer(
             call.respond(HttpStatusCode.InternalServerError)
         }
     }
+
+    /** Either generation's header names the phone; the current one wins when both are present. */
+    private fun phoneIdOf(call: ApplicationCall): String? =
+        call.request.headers[PairedSyncWire.PHONE_HEADER] ?: call.request.headers[PairedSyncWire.PHONE_HEADER_LEGACY]
 
     // A body with no length (chunked) is refused before anything is read: it could go on forever, and
     // nothing has been authenticated yet. The app's own client always sends one.
@@ -207,9 +216,10 @@ class PairedSyncServer(
         call: ApplicationCall,
         key: ByteArray,
         kind: String,
+        dialect: PairedSyncWire.Dialect,
         phoneId: String,
         plain: ByteArray,
-    ) = call.respondBytes(LoginSyncCipher.seal(key, PairedSyncWire.aad(kind, true, phoneId), plain), ContentType.Application.OctetStream)
+    ) = call.respondBytes(LoginSyncCipher.seal(key, PairedSyncWire.aad(dialect, kind, true, phoneId), plain), ContentType.Application.OctetStream)
 
     private fun knockReply(
         nonce: String,
@@ -257,18 +267,27 @@ class PairedSyncServer(
         packet: DatagramPacket,
     ) {
         val data = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
-        val magic = PairedSyncWire.PROBE_MAGIC
-        if (data.size <= magic.size + 1 || !data.copyOfRange(0, magic.size).contentEquals(magic)) return
+        // Either generation's probe magic may head the packet; the answer echoes it and seals in
+        // the dialect it arrived in, so both old and new phones recognize the reply.
+        val (magic, dialect) =
+            listOf(
+                PairedSyncWire.PROBE_MAGIC to PairedSyncWire.Dialect.CURRENT,
+                PairedSyncWire.PROBE_MAGIC_LEGACY to PairedSyncWire.Dialect.LEGACY,
+            ).firstOrNull { (m, _) -> data.size > m.size + 1 && data.copyOfRange(0, m.size).contentEquals(m) }
+                ?: return
         val idLength = data[magic.size].toInt() and 0xff
         val idEnd = magic.size + 1 + idLength
         if (data.size <= idEnd) return
         val phoneId = data.copyOfRange(magic.size + 1, idEnd).decodeToString()
         val active = handler.keyFor(phoneId)
         val key = active ?: handler.revokedKeyFor(phoneId) ?: return
-        val plain = LoginSyncCipher.open(key, PairedSyncWire.aad(PairedSyncWire.PROBE, false, phoneId), data.copyOfRange(idEnd, data.size)) ?: return
+        val plain =
+            PairedSyncWire.openSealed(key, PairedSyncWire.PROBE, reply = false, phoneId = phoneId, sealed = data.copyOfRange(idEnd, data.size))
+                ?.first ?: return
         val knock = PairedSyncWire.json.decodeFromString(Knock.serializer(), plain.decodeToString())
-        val sealed = LoginSyncCipher.seal(key, PairedSyncWire.aad(PairedSyncWire.PROBE, true, phoneId), knockReply(knock.nonce, active == null))
-        val reply = PairedSyncWire.REPLY_MAGIC + sealed
+        val sealed = LoginSyncCipher.seal(key, PairedSyncWire.aad(dialect, PairedSyncWire.PROBE, true, phoneId), knockReply(knock.nonce, active == null))
+        val replyMagic = if (dialect == PairedSyncWire.Dialect.CURRENT) PairedSyncWire.REPLY_MAGIC else PairedSyncWire.REPLY_MAGIC_LEGACY
+        val reply = replyMagic + sealed
         socket.send(DatagramPacket(reply, reply.size, packet.socketAddress))
     }
 }
