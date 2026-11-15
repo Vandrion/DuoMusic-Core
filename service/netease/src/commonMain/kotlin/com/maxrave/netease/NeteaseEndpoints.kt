@@ -747,21 +747,33 @@ suspend fun NeteaseClient.radioTrash(songId: Long): Result<NeteaseSong?> =
         body.array("data")?.firstOrNull()?.let { it.toSong() }
     }
 
+/**
+ * 红心切换(eapi /song/like,Melodia 真机抓包同形状 {trackId, like:Boolean},**无 userid**;
+ * multiPlatformMusicApi 带 userid 的变体非必需)。**like 必须是布尔**。
+ *
+ * 2026-11-15 通道切换定案(LikeEapiProbe 同刻 A/B 实测):weapi 同端点被服务端环境风控——
+ * 同账号同曲 eapi 200+回读落库,weapi 业务码 **524 "当前环境异常,已取消喜欢"**(真机
+ * 3.12.18 间歇报错的真身;10-10 探针 weapi 尚可往返=服务端近期收紧,间歇性=过渡期按
+ * 实例波动)。官方 App 红心写走 eapi,weapi 是网页端遗留通道。
+ */
 suspend fun NeteaseClient.likeSong(
     songId: Long,
     like: Boolean,
 ): Result<Boolean> =
     runCatching {
         val body =
-            callWeApi(
+            callEApi(
                 "/song/like",
-                mapOf("trackId" to songId, "like" to like.toString()),
+                mapOf("trackId" to songId, "like" to like),
             )
         val code = (body["code"] as? JsonPrimitive)?.content
         // W 级留痕(2026-11-15):业务 code!=200 曾被静默折叠成 success(false)——真机"账号
-        // 操作失败"无任何日志无从排查;code 是定位风控(405)/登录态(301)/参数(400)的唯一线索
+        // 操作失败"无任何日志无从排查;code 是定位风控(405)/登录态(301)/参数(400)的唯一线索。
+        // msg/message 必须打**值**——旧实现只打 body.keys,524 的"当前环境异常"打了字段名没打值
         if (code != "200") {
-            com.maxrave.logger.Logger.w("NeteaseEndpoints", "like rejected: id=$songId like=$like code=$code body=${body.keys}")
+            val msg = (body["msg"] as? JsonPrimitive)?.content
+            val message = (body["message"] as? JsonPrimitive)?.content
+            com.maxrave.logger.Logger.w("NeteaseEndpoints", "like rejected: id=$songId like=$like code=$code msg=$msg message=$message")
         }
         code == "200"
     }
