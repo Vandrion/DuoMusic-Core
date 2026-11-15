@@ -729,8 +729,21 @@ internal class SongRepositoryImpl(
     ): Result<Boolean> =
         if (videoId.toLongOrNull() != null) {
             // 网易:透传 Result,405 频控异常(NeteaseRateLimitException)一路带到 UI
-            if (!neteaseRepository.isLoggedIn.first()) Result.success(false)
-            else neteaseRepository.setSongLiked(videoId, liked)
+            if (!neteaseRepository.isLoggedIn.first()) {
+                Result.success(false)
+            } else {
+                neteaseRepository.setSongLiked(videoId, liked).also { result ->
+                    // W 级留痕:真机"账号操作失败"但 app.log 无任何记录(2026-11-15),异常/code
+                    // 折叠在 Result 里到 UI 就只剩 toast——下次失败直接从日志拿真相。
+                    if (result.getOrNull() != true) {
+                        Logger.w(
+                            TAG,
+                            "netease like failed: id=$videoId liked=$liked " +
+                                "ok=${result.getOrNull()} ex=${result.exceptionOrNull()?.javaClass?.simpleName}:${result.exceptionOrNull()?.message}",
+                        )
+                    }
+                }
+            }
         } else {
             if (dataStoreManager.cookie.first().isEmpty()) {
                 Result.success(false)
