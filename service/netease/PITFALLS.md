@@ -15,8 +15,8 @@
 
 | 通道 | 入口函数 | 加密 | 主机 | 生产用途 |
 |---|---|---|---|---|
-| **weapi**（网页端） | `callWeApi(path, params)` | 两层 AES-CBC（一层固定密钥一层随机密钥）+ RSA 包裹随机密钥，`NeteaseCrypto.weApiEncrypt` | `music.163.com/weapi/...` | **大头**：歌单详情/曲目分片、songDetail、歌手/专辑/搜索/cloudsearch、评论列表 v1+v2、红心/关注/收藏/建单删单等一般写操作 |
-| **eapi**（官方 App 主通道） | `callEApi(path, params)` | AES-128-ECB 固定密钥 `e82ckenh8dichen8` + 摘要（`/eapi/...`→`/api/...` 路径+参数+md5），`NeteaseCrypto.eApiEncrypt` | `interface.music.163.com/eapi/...` | 专辑详情（weapi 简介窗口性为空的修复通道）、电台/播客读家族、**歌单编辑 desc/tags、收藏/取消收藏歌单**（2026-10-11 起，见下） |
+| **weapi**（网页端） | `callWeApi(path, params)` | 两层 AES-CBC（一层固定密钥一层随机密钥）+ RSA 包裹随机密钥，`NeteaseCrypto.weApiEncrypt` | `music.163.com/weapi/...` | **大头**：歌单详情/曲目分片、songDetail、歌手/专辑/搜索/cloudsearch、评论列表 v1+v2、关注/建单删单等一般写操作。**注意服务端在逐端点收紧：红心已 524（见风控矩阵）、`/user/account` 已 404** |
+| **eapi**（官方 App 主通道） | `callEApi(path, params)` | AES-128-ECB 固定密钥 `e82ckenh8dichen8` + 摘要（`/eapi/...`→`/api/...` 路径+参数+md5），`NeteaseCrypto.eApiEncrypt` | `interface.music.163.com/eapi/...` | 专辑详情（weapi 简介窗口性为空的修复通道）、电台/播客读家族、**歌单编辑 desc/tags、收藏/取消收藏歌单**（2026-10-11 起，见下）、**红心 `/song/like`**（2026-11-15 迁入，见风控矩阵） |
 | **明文 api** | `callApi` / `callApiGet` / `getText` | 无加密，浏览器头（Origin/Referer/desktopUa） | `music.163.com/api/...` | 红心总数 `/song/red/count`、二维码登录轮询、艺人头像探针、相似歌单 HTML 抓取（getText）、JVM 探针 |
 | **xeapi**（官方 App 9.5.x 写操作通道） | `callXeApi(path, data)` | X25519 密钥协商 + AES-GCM + HMAC-SHA256 + 自定义混淆 + 设备注册（详见下节） | `interface3.music.163.com/xeapi/...` | **评论类写操作：发评/回复/删评/点赞** |
 | linuxapi | `linuxApiEncrypt`（无 call 入口） | AES-ECB 固定密钥包 `/api/linux/forward` 转发 | — | 仅探针实验用，生产未用 |
@@ -56,6 +56,16 @@
   即证），别为绕它移植新通道。**但有例外（2026-10-11）**：`/playlist/desc/update` 的长效 405
   实为 eapi 协议头残缺（见上节，补齐即 200+落库），收藏/取消收藏也已迁 eapi——长持不散的 405
   先对照社区实现核协议头，再下风控结论。
+- **🚨红心 weapi 已被服务端环境风控（2026-11-15 LikeEapiProbe 同刻 A/B 定案，已迁 eapi）**：
+  weapi `/song/like`（like 转字符串、无 userid 的旧形状）对普通单曲间歇回**业务码 524
+  msg="当前环境异常，已取消喜欢"**（真机 3.12.18 用户报障的当事曲《慌啥子嘛》fee=1 VIP 因素
+  排除）；**同账号同刻同曲 eapi `/song/like` 200 且红心真正落「我喜欢的音乐」（回读 508→509）**。
+  10-10 探针 weapi 尚可往返=服务端近期收紧，间歇性=过渡期按实例波动。**eapi 形状=Melodia
+  真机抓包 `{trackId, like:Boolean}`，无 userid**（multiPlatformMusicApi 的带 userid 变体非必需；
+  MusicBox 的 `/api/radio/like` 是 FM 反馈语义，MeloX 记录红心不落"我喜欢的音乐"，别当回退）。
+  教训：**业务码 524/250 的拒绝日志必须打 msg/message 的值**——旧实现只打 body.keys，
+  "当前环境异常"这种关键原因被打成了字段名清单。附带：weapi `/user/account` 已 404"接口
+  未找到"（明文 `/nuser/account/get` 仍活；app 的 `/w/nuser/account/get` 无恙）。
 - X-Real-IP / os=pc 等头域伪装**绕不开**设备风控（实测）。
 
 **评论端点速查**：
