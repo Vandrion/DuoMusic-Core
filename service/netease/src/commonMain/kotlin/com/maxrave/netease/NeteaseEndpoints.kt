@@ -757,7 +757,13 @@ suspend fun NeteaseClient.likeSong(
                 "/song/like",
                 mapOf("trackId" to songId, "like" to like.toString()),
             )
-        (body["code"] as? JsonPrimitive)?.content == "200"
+        val code = (body["code"] as? JsonPrimitive)?.content
+        // W 级留痕(2026-11-15):业务 code!=200 曾被静默折叠成 success(false)——真机"账号
+        // 操作失败"无任何日志无从排查;code 是定位风控(405)/登录态(301)/参数(400)的唯一线索
+        if (code != "200") {
+            com.maxrave.logger.Logger.w("NeteaseEndpoints", "like rejected: id=$songId like=$like code=$code body=${body.keys}")
+        }
+        code == "200"
     }
 
 /**
