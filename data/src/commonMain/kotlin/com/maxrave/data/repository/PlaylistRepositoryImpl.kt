@@ -725,6 +725,11 @@ internal class PlaylistRepositoryImpl(
                                     parseNextLibraryPlaylist(nextInput),
                                 )
                             }.onFailure { exception ->
+                                // 协程取消(离开库页等)不是错误——曾打进 error.log 刷屏
+                                // ("k3e was cancelled",2026-11-18 真机日志实锤)
+                                if (exception is kotlinx.coroutines.CancellationException) {
+                                    throw exception
+                                }
                                 exception.printStackTrace()
                                 Logger.e("Library", "Error: ${exception.message}")
                                 continuation = null
@@ -749,6 +754,9 @@ internal class PlaylistRepositoryImpl(
                         emit(emptyList())
                     }
                 }.onFailure { e ->
+                    if (e is kotlinx.coroutines.CancellationException) {
+                        throw e
+                    }
                     Logger.e("Library", "Error: ${e.message}")
                     e.printStackTrace()
                     val account = localDataSource.getUsedGoogleAccount()
@@ -836,6 +844,7 @@ internal class PlaylistRepositoryImpl(
                                 continuation = nextData.second
                                 listItem.addAll(parseNextLibraryPlaylist(nextData.first).map { it.toAlbumsResult() })
                             }.onFailure { exception ->
+                                if (exception is kotlinx.coroutines.CancellationException) throw exception
                                 exception.printStackTrace()
                                 Logger.e("Library", "getLibraryAlbum continuation error: ${exception.message}")
                                 continuation = null
